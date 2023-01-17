@@ -1,4 +1,5 @@
-# nostr-proxy-py
+# nostr-py-proxy
+
 Proxy between nostr clients and relays
 
 Why a proxy is even needed?
