@@ -3,26 +3,36 @@ import websockets
 import logging
 import argparse
 import random
-import time
 from urllib.parse import urlparse
+from pythonostr.nostr import event
+from pythonostr.nostr.message_type import RelayMessageType
+import time
+import json
+
+# Init messages cache   
+messages_cache = {}
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-8s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 def parse_args():
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--public-servers", nargs='+', default=[("server1", 8765), ("server2", 8765), ("server3", 8765)], help="List of public servers in the format <url> <port>")
     parser.add_argument("--private-servers", nargs='+', default=[("private_server1", 8765), ("private_server2", 8765), ("private_server3", 8765)], help="List of private servers in the format <url> <port>")
     parser.add_argument("--listen-ip", default="localhost", help="IP address to listen on")
     parser.add_argument("--listen-port", default=8765, type=int, help="Port to listen on")
+    parser.add_argument("--note-cache-time", default=120, type=int, help="Seconds till a note is deleted from cache to check for duplicates")
+    parser.add_argument("--filter-large-media", action='store_true', help="Filter notes with links to large media files")
+    
     return parser.parse_args()
 
 async def handle_client(websocket):
     connected_clients.add(websocket)
     try:
         while True:
-            message = await websocket.recv()            
+            message = await websocket.recv()
             # send the message to all connected private servers
             for server in connected_private_servers:
                 try:
@@ -59,6 +69,36 @@ async def handle_server(websocket, path):
     try:
         while True:
             message = await websocket.recv()
+            message = message.strip("\n")
+            if not message or message[0] != "[" or message[-1] != "]":
+                continue
+
+            message_json = json.loads(message)
+            message_type = message_json[0]
+            if not RelayMessageType.is_valid(message_type):
+                continue
+        
+            if message_type == RelayMessageType.EVENT and not len(message_json) == 3:
+                continue
+
+            e = message_json[2]
+            event = event.Event(
+                e["content"],
+                e["pubkey"],
+                e["created_at"],
+                e["kind"],
+                e["tags"],
+                e["sig"],
+            )
+
+            if not event.verify():
+                continue
+
+            if e["sig"] in messages_cache:
+                continue
+            else:
+                messages_cache[e["sig"]] = time.time()
+
             # send the message to all connected clients
             for client in connected_clients:
                 await client.send(message)
@@ -69,6 +109,16 @@ async def handle_server(websocket, path):
         retry_server_connection(websocket, websocket in connected_private_servers)
     except Exception as e:
         logger.error(f"Error in handle_server: {e}")
+
+def cleanup_messages_cache(time_limit):
+    # Remove any messages whose timestamps are older than the time limit
+    while True:
+        now = time.time()
+        for sig, timestamp in list(messages_cache.items()):
+            if now - timestamp >= time_limit:
+                del messages_cache[sig]
+        time.sleep(5)
+
 
 def retry_server_connection(server, is_private):
     async def retry():
@@ -86,7 +136,6 @@ def retry_server_connection(server, is_private):
             retry()
     asyncio.create_task(retry())
 
-    
 async def connect_to_servers():
     try:
         tasks = []	
@@ -124,6 +173,7 @@ if __name__ == "__main__":
     start_server = websockets.serve(handle_client, args.listen_ip, args.listen_port)
     asyncio.ensure_future(start_server)
     asyncio.ensure_future(connect_to_servers())
+    asyncio.ensure_future(cleanup_messages_cache(args.note_cache_time))
     try:
         asyncio.get_event_loop().run_forever()
     except Exception as e:
