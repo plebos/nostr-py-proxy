@@ -235,7 +235,7 @@ async def connect_to_servers(public_servers, private_servers, filter_large_media
         logger.error(f"Error connecting to servers: {e}")
 
 async def websocket_server(func, ip, port):
-    server = await websockets.serve(handle_client, ip, 10000)
+    server = await websockets.serve(handle_client, ip, port)
     logger.info(f"[*] Starting a websocket server on {ip}:{port}")
     try:
         await server.wait_closed()
